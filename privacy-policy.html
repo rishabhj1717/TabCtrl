@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>TabCtrl privacy policy</title>
+  <style>
+    body {
+      max-width: 40rem;
+      margin: 2rem auto;
+      padding: 0 1rem;
+      color: #1c1c1e;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      line-height: 1.5;
+    }
+    h1 { font-size: 1.6rem; }
+    h2 { font-size: 1.1rem; margin-top: 1.6rem; }
+  </style>
+</head>
+<body>
+  <h1>TabCtrl privacy policy</h1>
+  <p>Last updated: 4 November 2026</p>
+  <p>TabCtrl is a Chrome extension that shows your recently used tabs in an on-screen switcher. This policy describes what the extension handles and where that information stays.</p>
+
+  <h2>Information the extension uses</h2>
+  <p>To build the switcher, TabCtrl uses information Chrome already has about your open tabs:</p>
+  <ul>
+    <li>Tab titles and URLs</li>
+    <li>Favicons for those tabs</li>
+    <li>A small screenshot of a tab, taken when that tab is the one on screen, so the switcher can show a preview</li>
+    <li>Your setting for how many recent tabs to show (5 or 10)</li>
+  </ul>
+  <p>Screenshots can include whatever was visible on the page at the time, such as text or images on that site.</p>
+
+  <h2>Where it is stored</h2>
+  <p>This information stays in your browser.</p>
+  <ul>
+    <li>The recent-tab list and the 5-or-10 setting are saved with <code>chrome.storage.local</code> and remain until you change the setting, close the tabs, or remove the extension.</li>
+    <li>Preview images are saved with <code>chrome.storage.session</code> and are cleared when you quit Chrome.</li>
+  </ul>
+  <p>TabCtrl does not send this information to a server operated by the developer. It does not use analytics, advertising, or third-party tracking.</p>
+
+  <h2>Requests to other sites</h2>
+  <p>To show a favicon, the extension may request that icon from the site the tab already belongs to. That request is made by your browser. The site that hosts the icon can see a normal request for its own file. The icon is then kept locally and shown inside the switcher. Preview screenshots are taken by Chrome on your computer and are not uploaded.</p>
+
+  <h2>What the extension does not do</h2>
+  <ul>
+    <li>It does not sell or share your data.</li>
+    <li>It does not read passwords, cookies, or form data on purpose.</li>
+    <li>It does not run on Chrome’s own pages, such as <code>chrome://</code> URLs or the Chrome Web Store.</li>
+  </ul>
+
+  <h2>How to remove it</h2>
+  <p>Remove TabCtrl from <code>chrome://extensions</code>. That deletes the recent-tab list, the setting, and the preview images stored by the extension.</p>
+
+  <h2>Contact</h2>
+  <p>Questions about this policy: rishabhj1717@gmail.com</p>
+</body>
+</html>

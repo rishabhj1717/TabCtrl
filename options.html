@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>TabCtrl</title>
+  <style>
+    body {
+      margin: 0;
+      width: 260px;
+      padding: 16px;
+      color: #1c1c1e;
+      background: #fff;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    }
+    h1 {
+      margin: 0 0 4px;
+      font-size: 16px;
+    }
+    p {
+      margin: 0 0 12px;
+      color: #555;
+      font-size: 13px;
+      line-height: 1.4;
+    }
+    label {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 0 -8px;
+      padding: 8px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 14px;
+    }
+    label:hover {
+      background: #f2f2f4;
+    }
+    input {
+      margin: 0;
+    }
+  </style>
+</head>
+<body>
+  <h1>TabCtrl</h1>
+  <p>Recent tabs shown in the switcher. Extra slots fill as you visit more tabs.</p>
+  <label><input type="radio" name="maxMruSize" value="5"> 5 tabs</label>
+  <label><input type="radio" name="maxMruSize" value="10"> 10 tabs</label>
+  <script src="options.js"></script>
+</body>
+</html>
