@@ -1,6 +1,6 @@
 # TabCtrl
 
-A Manifest V3 Chrome extension for visual MRU (Most Recently Used) tab navigation. Hold Alt and tap S to move through recent tabs, then release Alt to switch. The overlay works like macOS Cmd+Tab or Arc's tab switcher.
+A Manifest V3 Chrome extension for visual MRU (Most Recently Used) tab navigation. Hold Alt and tap S to move through recent tabs, then release Alt to switch. The overlay works like macOS Cmd+Tab or Arc's tab switcher. You can find it on chrome webstore or it shall open as soon as you click this link - https://chromewebstore.google.com/detail/tabctrl/dedipklofclnllandojfbocifjpeikif
 
 ## Features
 
