@@ -1,13 +1,46 @@
 // TabCtrl Background Service Worker
 // Manages MRU (Most Recently Used) tab tracking and tab switching
 
-// In-memory MRU queue with persistence
-let mruTabIds = [];
+// Per-window MRU queues: { [windowId]: number[] }, persisted in chrome.storage.local
+let mruByWindow = Object.create(null);
 let maxMruSize = 5;
 let isInitialized = false;
 
 function normalizeMaxMruSize(value) {
   return Number(value) === 10 ? 10 : 5;
+}
+
+function windowKey(windowId) {
+  return String(windowId);
+}
+
+function getMruList(windowId) {
+  const key = windowKey(windowId);
+  if (!Array.isArray(mruByWindow[key])) {
+    mruByWindow[key] = [];
+  }
+  return mruByWindow[key];
+}
+
+function setMruList(windowId, ids) {
+  mruByWindow[windowKey(windowId)] = ids;
+}
+
+function allMruIds() {
+  const ids = new Set();
+  for (const list of Object.values(mruByWindow)) {
+    if (!Array.isArray(list)) continue;
+    for (const id of list) ids.add(id);
+  }
+  return ids;
+}
+
+function serializeMru() {
+  const out = {};
+  for (const [key, list] of Object.entries(mruByWindow)) {
+    if (Array.isArray(list) && list.length) out[key] = list;
+  }
+  return out;
 }
 
 async function loadPreferences() {
@@ -19,9 +52,14 @@ async function loadPreferences() {
 }
 
 function trimMruToLimit() {
-  if (mruTabIds.length <= maxMruSize) return;
-  mruTabIds = mruTabIds.slice(0, maxMruSize);
-  saveMruToStorage();
+  let changed = false;
+  for (const key of Object.keys(mruByWindow)) {
+    const list = mruByWindow[key];
+    if (!Array.isArray(list) || list.length <= maxMruSize) continue;
+    mruByWindow[key] = list.slice(0, maxMruSize);
+    changed = true;
+  }
+  if (changed) saveMruToStorage();
 }
 
 chrome.storage.onChanged.addListener((changes, area) => {
@@ -30,48 +68,79 @@ chrome.storage.onChanged.addListener((changes, area) => {
   trimMruToLimit();
 });
 
-// Load MRU from storage on startup
+async function validateTabId(tabId, expectedWindowId) {
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    if (expectedWindowId != null && tab.windowId !== Number(expectedWindowId)) {
+      return null;
+    }
+    return tab;
+  } catch (error) {
+    return null;
+  }
+}
+
+// Load MRU from storage on startup. Migrates legacy flat mruTabIds if present.
 async function loadMruFromStorage() {
   await loadPreferences();
   try {
-    const result = await chrome.storage.local.get(['mruTabIds']);
-    if (result.mruTabIds && Array.isArray(result.mruTabIds)) {
-      // Validate that tabs still exist
-      const validTabIds = [];
+    const result = await chrome.storage.local.get(['mruByWindow', 'mruTabIds']);
+    const next = Object.create(null);
+
+    if (result.mruByWindow && typeof result.mruByWindow === 'object' && !Array.isArray(result.mruByWindow)) {
+      for (const [wid, ids] of Object.entries(result.mruByWindow)) {
+        if (!Array.isArray(ids)) continue;
+        const valid = [];
+        for (const tabId of ids) {
+          if (await validateTabId(tabId, wid)) valid.push(tabId);
+        }
+        if (valid.length) next[wid] = valid.slice(0, maxMruSize);
+      }
+    } else if (Array.isArray(result.mruTabIds)) {
       for (const tabId of result.mruTabIds) {
-        try {
-          await chrome.tabs.get(tabId);
-          validTabIds.push(tabId);
-        } catch (e) {
-          // Tab doesn't exist anymore
+        const tab = await validateTabId(tabId);
+        if (!tab) continue;
+        const key = windowKey(tab.windowId);
+        if (!next[key]) next[key] = [];
+        if (!next[key].includes(tabId) && next[key].length < maxMruSize) {
+          next[key].push(tabId);
         }
       }
-      mruTabIds = validTabIds.slice(0, maxMruSize);
-      console.log('Loaded MRU from storage:', mruTabIds);
     }
+
+    mruByWindow = next;
+    await chrome.storage.local.set({ mruByWindow: serializeMru() });
+    if (result.mruTabIds !== undefined) {
+      await chrome.storage.local.remove('mruTabIds');
+    }
+    console.log('Loaded MRU from storage:', serializeMru());
   } catch (error) {
     console.error('Error loading MRU from storage:', error);
   }
   isInitialized = true;
 }
 
-loadPreferences();
+// Eager load so the first Alt+S after SW wake does not wait on a cold storage round-trip alone.
+loadMruFromStorage();
 
-// Save MRU to storage
 async function saveMruToStorage() {
   try {
-    await chrome.storage.local.set({ mruTabIds: mruTabIds });
+    await chrome.storage.local.set({ mruByWindow: serializeMru() });
   } catch (error) {
     console.error('Error saving MRU to storage:', error);
   }
+}
+
+function isStoreUrl(url) {
+  return url.includes('chrome.google.com/webstore') ||
+    url.includes('chromewebstore.google.com');
 }
 
 function isScriptableUrl(url) {
   if (!url) return false;
   if (url === 'about:blank') return true;
   const blocked = ['chrome://', 'chrome-extension://', 'edge://', 'about:', 'data:', 'file://', 'devtools://'];
-  return !blocked.some((prefix) => url.startsWith(prefix)) &&
-    !url.includes('chrome.google.com/webstore');
+  return !blocked.some((prefix) => url.startsWith(prefix)) && !isStoreUrl(url);
 }
 
 // Inject into tabs that were already open. Parallel, so a window with 100+
@@ -116,10 +185,10 @@ async function ensureContentScript(tabId) {
 // Initialize on service worker startup
 chrome.runtime.onInstalled.addListener(async (details) => {
   console.log('TabCtrl installed/updated');
-  
+
   await loadPreferences();
   await loadMruFromStorage();
-  
+
   // Inject content scripts into all existing tabs
   if (details.reason === 'install' || details.reason === 'update') {
     console.log('Injecting content scripts into existing tabs...');
@@ -132,12 +201,11 @@ chrome.runtime.onInstalled.addListener(async (details) => {
 chrome.runtime.onStartup.addListener(async () => {
   await loadPreferences();
   await loadMruFromStorage();
-  console.log('Service worker started, MRU loaded:', mruTabIds);
+  console.log('Service worker started, MRU loaded:', serializeMru());
 });
 
-// Track tab activations for MRU ordering
+// Track tab activations for MRU ordering (per window)
 chrome.tabs.onActivated.addListener(async (activeInfo) => {
-  // Ensure MRU is loaded
   if (!isInitialized) {
     await loadMruFromStorage();
   }
@@ -152,28 +220,32 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
   if (activatedTab.url?.startsWith('chrome-extension://')) return;
 
   const tabId = activeInfo.tabId;
-  
-  // Remove any existing occurrence of this tabId
-  mruTabIds = mruTabIds.filter(id => id !== tabId);
-  
-  // Add to front of array
-  mruTabIds.unshift(tabId);
-  
-  // Trim to max size
-  if (mruTabIds.length > maxMruSize) {
-    mruTabIds = mruTabIds.slice(0, maxMruSize);
+  const windowId = activeInfo.windowId;
+  let list = getMruList(windowId).filter((id) => id !== tabId);
+  list.unshift(tabId);
+  if (list.length > maxMruSize) {
+    list = list.slice(0, maxMruSize);
   }
-  
-  console.log('MRU updated:', mruTabIds);
-  
-  // Save to storage
+  setMruList(windowId, list);
+
+  console.log('MRU updated for window', windowId, ':', list);
+
   await saveMruToStorage();
-  scheduleThumbnailCapture(activeInfo.windowId, tabId);
+  scheduleThumbnailCapture(windowId, tabId);
 });
 
-// Clean up removed tabs from MRU array
-chrome.tabs.onRemoved.addListener(async (tabId) => {
-  mruTabIds = mruTabIds.filter(id => id !== tabId);
+// Clean up removed tabs from the window's MRU list
+chrome.tabs.onRemoved.addListener(async (tabId, removeInfo) => {
+  if (removeInfo?.windowId != null) {
+    setMruList(
+      removeInfo.windowId,
+      getMruList(removeInfo.windowId).filter((id) => id !== tabId)
+    );
+  } else {
+    for (const key of Object.keys(mruByWindow)) {
+      mruByWindow[key] = mruByWindow[key].filter((id) => id !== tabId);
+    }
+  }
   thumbnailCache.delete(tabId);
   console.log('Tab removed from MRU:', tabId);
   await saveMruToStorage();
@@ -252,8 +324,7 @@ let thumbnailTimer = null;
 function canCaptureUrl(url) {
   if (!url) return false;
   const blocked = ['chrome://', 'chrome-extension://', 'edge://', 'about:', 'data:', 'file://', 'devtools://'];
-  return !blocked.some((prefix) => url.startsWith(prefix)) &&
-    !url.includes('chrome.google.com/webstore');
+  return !blocked.some((prefix) => url.startsWith(prefix)) && !isStoreUrl(url);
 }
 
 function blobToDataUrl(blob) {
@@ -324,7 +395,7 @@ async function captureActiveThumbnail(windowId, expectedTabId) {
   }
   thumbnailCache.set(active.id, thumb);
   // Keep only recent ids so session storage stays small.
-  const keep = new Set(mruTabIds);
+  const keep = allMruIds();
   keep.add(active.id);
   for (const id of thumbnailCache.keys()) {
     if (!keep.has(id)) thumbnailCache.delete(id);
@@ -342,18 +413,19 @@ function scheduleThumbnailCapture(windowId, tabId) {
   }, 400);
 }
 
-// Fill a thin MRU from tabs the user already had open, newest first.
-// This is the list right after install, before anyone has switched tabs.
+// Fill a thin per-window MRU from tabs already open in that window.
 async function seedMruFromWindow(windowId) {
-  if (!windowId || mruTabIds.length > 1) return;
+  if (!windowId) return;
+  const existing = getMruList(windowId);
+  if (existing.length > 1) return;
   const windowTabs = await chrome.tabs.query({ windowId });
   const ranked = windowTabs
     .filter((tab) => tab.id && isScriptableUrl(tab.url))
     .sort((a, b) => (b.lastAccessed || 0) - (a.lastAccessed || 0))
     .slice(0, maxMruSize)
     .map((tab) => tab.id);
-  if (ranked.length > mruTabIds.length) {
-    mruTabIds = ranked;
+  if (ranked.length > existing.length) {
+    setMruList(windowId, ranked);
   }
 }
 
@@ -368,19 +440,22 @@ async function getEnrichedMruTabs(windowId, activeTabId) {
 
   // The tab that requested the list is the one on screen. Keep it first so
   // the highlight (index 1) is always the previous tab.
+  let list = getMruList(windowId).slice();
   if (activeTabId) {
-    mruTabIds = mruTabIds.filter((id) => id !== activeTabId);
-    mruTabIds.unshift(activeTabId);
-    if (mruTabIds.length > maxMruSize) {
-      mruTabIds = mruTabIds.slice(0, maxMruSize);
+    list = list.filter((id) => id !== activeTabId);
+    list.unshift(activeTabId);
+    if (list.length > maxMruSize) {
+      list = list.slice(0, maxMruSize);
     }
   }
+  setMruList(windowId, list);
+  saveMruToStorage();
 
   if (thumbnailCache.size === 0) {
     await loadThumbnails();
   }
 
-  const lookedUp = await Promise.all(mruTabIds.map(async (tabId) => {
+  const lookedUp = await Promise.all(list.map(async (tabId) => {
     try {
       return await chrome.tabs.get(tabId);
     } catch (error) {
@@ -456,48 +531,48 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         console.error('Error getting MRU tabs:', error);
         sendResponse({ tabs: [], error: error.message });
       });
-    
+
     return true; // Keep channel open for async response
   }
-  
+
   // Handle switchToTab action
   if (request.action === 'switchToTab') {
     const tabId = request.tabId;
-    
+
     chrome.tabs.update(tabId, { active: true })
       .then(() => {
         sendResponse({ success: true });
       })
       .catch(error => {
         console.error('Error switching to tab:', error);
-        sendResponse({ 
-          success: false, 
-          error: 'Tab no longer exists or cannot be activated' 
+        sendResponse({
+          success: false,
+          error: 'Tab no longer exists or cannot be activated'
         });
       });
-    
+
     return true; // Keep channel open for async response
   }
-  
+
   // Handle closeTab action
   if (request.action === 'closeTab') {
     const tabId = request.tabId;
-    
+
     chrome.tabs.remove(tabId)
       .then(() => {
         sendResponse({ success: true });
       })
       .catch(error => {
         console.error('Error closing tab:', error);
-        sendResponse({ 
-          success: false, 
-          error: 'Tab cannot be closed' 
+        sendResponse({
+          success: false,
+          error: 'Tab cannot be closed'
         });
       });
-    
+
     return true; // Keep channel open for async response
   }
-  
+
   // Return false for unknown actions (don't keep channel open)
   return false;
 });
@@ -508,6 +583,10 @@ let switcherWindowId = null;
 
 chrome.windows.onRemoved.addListener((windowId) => {
   if (windowId === switcherWindowId) switcherWindowId = null;
+  if (mruByWindow[windowKey(windowId)]) {
+    delete mruByWindow[windowKey(windowId)];
+    saveMruToStorage();
+  }
 });
 
 async function focusSwitcherWindow() {
@@ -554,7 +633,7 @@ async function openSwitcherWindow(browserWindowId) {
 chrome.commands.onCommand.addListener(async (command) => {
   if (command === 'toggle-tab-switcher') {
     console.log('Tab switcher command triggered');
-    
+
     try {
       if (switcherWindowId != null) {
         try {
@@ -568,12 +647,12 @@ chrome.commands.onCommand.addListener(async (command) => {
 
       // Get the active tab
       const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-      
+
       if (!activeTab || !activeTab.id) {
         console.error('No active tab found');
         return;
       }
-      
+
       let tab = activeTab;
       if (!tab.url || tab.url === 'about:blank') {
         tab = await chrome.tabs.get(tab.id);

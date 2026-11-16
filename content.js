@@ -37,12 +37,12 @@ const FALLBACK_CSS = `
   .tab-item { background: white; border-radius: 12px; padding: 12px; min-width: 200px; cursor: pointer; }
 `;
 
-// Initialize content script
+// Initialize content script. CSS is loaded lazily on first overlay open
+// so every navigation does not wake the service worker.
 function init() {
   console.log('TabCtrl content script loaded');
   attachKeyboardListeners();
   attachMessageListener();
-  loadOverlayCss();
 }
 
 // CSS is read by the service worker and sent as text. Fetching
@@ -109,7 +109,7 @@ function handleKeyDown(event) {
   const isS = event.code === 'KeyS' && !event.metaKey && !event.ctrlKey;
 
   if (!switcherActive) {
-    if ((event.altKey && isS && !event.shiftKey) || (event.ctrlKey && event.key === 'Tab')) {
+    if (event.altKey && isS && !event.shiftKey) {
       event.preventDefault();
       event.stopPropagation();
       console.log('✓ Opening switcher');
@@ -131,17 +131,6 @@ function handleKeyDown(event) {
     } else {
       console.log('→ Cycling forward (Alt+S), index:', selectedIndex);
       cycleForward();
-    }
-    return;
-  }
-
-  if (event.ctrlKey && event.key === 'Tab') {
-    event.preventDefault();
-    event.stopPropagation();
-    if (event.shiftKey) {
-      cycleSelectionUp();
-    } else {
-      cycleSelectionDown();
     }
     return;
   }
@@ -292,7 +281,9 @@ function mountOverlay() {
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   `;
 
-  const shadow = host.attachShadow({ mode: 'open' });
+  // Closed mode keeps titles, URLs, and thumbnails out of page JS
+  // (document.getElementById('tabctrl-overlay').shadowRoot is null).
+  const shadow = host.attachShadow({ mode: 'closed' });
   const style = document.createElement('style');
   style.textContent = overlayCssText || FALLBACK_CSS;
   shadow.appendChild(style);
@@ -600,16 +591,6 @@ function closeSwitcher() {
   switcherActive = false;
   selectedIndex = 1;
   tabs = [];
-}
-
-// Utility: Escape HTML to prevent XSS
-function escapeHtml(unsafe) {
-  return unsafe
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#039;");
 }
 
 // Initialize when script loads

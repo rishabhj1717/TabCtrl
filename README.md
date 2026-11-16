@@ -1,6 +1,6 @@
 # TabCtrl
 
-A Manifest V3 Chrome extension for visual MRU (Most Recently Used) tab navigation. Hold Alt and tap S to move through recent tabs, then release Alt to switch. The overlay works like macOS Cmd+Tab or Arc's tab switcher. You can find it on chrome webstore or it shall open as soon as you click this link - https://chromewebstore.google.com/detail/tabctrl/dedipklofclnllandojfbocifjpeikif
+A Manifest V3 Chrome extension for visual MRU (Most Recently Used) tab navigation. Hold Alt and tap S to move through recent tabs, then release Alt to switch. The overlay works like macOS Cmd+Tab or Arc's tab switcher. You can find it on the Chrome Web Store: https://chromewebstore.google.com/detail/tabctrl/dedipklofclnllandojfbocifjpeikif
 
 ## Features
 
@@ -10,7 +10,7 @@ A Manifest V3 Chrome extension for visual MRU (Most Recently Used) tab navigatio
 - **Skip without switching**: Esc closes the panel and leaves you on the current tab.
 - **Previews**: Each card shows a small screenshot taken the last time that tab was on screen, plus the page title and favicon.
 - **Arrow keys**: Left/Up moves backward. Right/Down moves forward.
-- **Current window only**: Tabs from other windows are not listed.
+- **Current window only**: Each browser window keeps its own MRU list. Tabs from other windows are not listed.
 - **Dark mode**: The panel follows the system color scheme.
 
 ## Installation
@@ -25,7 +25,7 @@ A Manifest V3 Chrome extension for visual MRU (Most Recently Used) tab navigatio
 
 ### Chrome Web Store
 
-Not published yet. To submit a package, zip the runtime files with `manifest.json` at the root of the archive:
+Published at the link above. To submit a package, zip the runtime files with `manifest.json` at the root of the archive:
 
 - `manifest.json`
 - `background.js`
@@ -33,6 +33,8 @@ Not published yet. To submit a package, zip the runtime files with `manifest.jso
 - `content.css`
 - `options.html`
 - `options.js`
+- `switcher.html`
+- `switcher.js`
 - `icons/`
 
 Do not include this README, other notes, or `.git`. The store listing needs a privacy-policy URL because the extension reads tab titles, URLs, favicons, and page screenshots. That data stays in the browser.
@@ -60,9 +62,11 @@ You can change the same setting from the extension's options page.
 ```
 TabCtrl/
 ├── manifest.json    # Manifest V3, Alt+S command, toolbar popup
-├── background.js    # MRU list, previews, favicons, tab switching
+├── background.js    # Per-window MRU, previews, favicons, tab switching
 ├── content.js       # Overlay, keyboard handling
 ├── content.css      # Overlay styles, inlined into the shadow root
+├── switcher.html    # Popup fallback for chrome:// and other restricted pages
+├── switcher.js
 ├── options.html     # 5 or 10 tab setting
 ├── options.js
 └── icons/
@@ -70,17 +74,18 @@ TabCtrl/
 
 ### Background service worker
 
-- Records tab activations and persists the MRU list in `chrome.storage.local`.
-- Drops ids when a tab closes, and drops ids that no longer exist when the list is loaded.
-- Puts the tab you are on at the front of the list each time the switcher opens.
+- Records tab activations per browser window and persists `mruByWindow` in `chrome.storage.local`.
+- Drops ids when a tab or window closes, and drops ids that no longer exist when the list is loaded.
+- Puts the tab you are on at the front of that window's list each time the switcher opens.
 - Reads `content.css` and sends the text to the page. The page never loads a `chrome-extension://` stylesheet.
 - Fetches favicons in the service worker and sends them as data URLs, so the page does not request another site's icon.
 - Photographs the visible tab with `captureVisibleTab`, shrinks it to a JPEG, and keeps it in `chrome.storage.session` for the browser session.
+- On restricted pages, opens `switcher.html` in a small popup window instead of an in-page overlay.
 
 ### Content script
 
 - Runs only in the top frame, not inside iframes.
-- Builds the panel in a shadow root and styles the host element directly.
+- Builds the panel in a closed shadow root and styles the host element directly.
 - Listens for Alt+S, Shift+S, arrows, Enter, and Esc.
 - Treats the browser command and the key event as one press, so the highlight moves one card per tap.
 - On Alt release, switches to the card that is actually highlighted.
@@ -88,14 +93,14 @@ TabCtrl/
 ### Styling
 
 - The overlay uses the maximum z-index so it sits above the page.
-- Shadow DOM keeps page CSS from restyling the panel.
+- Closed Shadow DOM keeps page CSS from restyling the panel and keeps other-tab metadata out of page JS.
 - The card row scrolls horizontally when 10 tabs do not fit.
 
 ## Known limitations
 
-The overlay cannot run on Chrome's own pages. Alt+S does nothing on:
+The in-page overlay cannot run on Chrome's own pages. On those URLs, Alt+S opens a popup switcher instead:
 
-- `chrome://` pages, including `chrome://extensions`
+- `chrome://` pages, including `chrome://extensions` and the new tab page
 - `chrome-extension://` pages
 - the Chrome Web Store
 - `about:`, `data:`, and `file://` pages
@@ -112,13 +117,13 @@ Chrome can only screenshot the tab that is visible. A card shows a letter placeh
 
 **Page logs:** open DevTools on the page and filter the console for TabCtrl.
 
-**MRU contents:** in the service worker console, inspect `mruTabIds` after the worker has woken up by opening the switcher once.
+**MRU contents:** in the service worker console, inspect `mruByWindow` after the worker has woken up by opening the switcher once.
 
 ## Contributing
 
 1. Fork the repository.
 2. Create a feature branch.
-3. Test on a normal web page, including Alt+S, Shift+S, Alt release, and Esc.
+3. Test on a normal web page, including Alt+S, Shift+S, Alt release, and Esc. Also try a second window and a `chrome://` page.
 4. Open a pull request that explains the change.
 
 ## License

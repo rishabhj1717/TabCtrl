@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "TabCtrl",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Navigate through your most recently used tabs with a visual overlay (Alt+S)",
   "icons": {
     "16": "icons/icon16.png",
