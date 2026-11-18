@@ -18,11 +18,16 @@ let tabs = [];
 let overlayElement = null;
 let shadowRoot = null;
 let overlayGeneration = 0;
+let mruRequestId = 0;
 let overlayCssText = '';
 let commitWhenReady = false;
 let ignoreNextCommandForward = false;
+// When the extension command opens the panel before keydown, the same Alt+S
+// keydown must not advance the highlight.
+let ignoreNextKeydownCycle = false;
 let pendingMoves = 0;
 let pendingVisuals = null;
+let altWasDown = false;
 
 const FALLBACK_CSS = `
   .tabctrl-switcher {
@@ -42,6 +47,7 @@ const FALLBACK_CSS = `
 function init() {
   console.log('TabCtrl content script loaded');
   attachKeyboardListeners();
+  attachLifecycleListeners();
   attachMessageListener();
 }
 
@@ -58,6 +64,22 @@ function loadOverlayCss() {
   });
 }
 
+function isOverlayMounted() {
+  return !!(overlayElement && shadowRoot && overlayElement.isConnected);
+}
+
+function recoverDesyncedState() {
+  if (switcherActive && !isOverlayMounted()) {
+    switcherActive = false;
+    tabs = [];
+    commitWhenReady = false;
+    ignoreNextCommandForward = false;
+    ignoreNextKeydownCycle = false;
+    pendingMoves = 0;
+    pendingVisuals = null;
+  }
+}
+
 // Listen for messages from background script
 function attachMessageListener() {
   chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
@@ -70,8 +92,11 @@ function attachMessageListener() {
       
       if (request.action === 'showSwitcher') {
         console.log('Show switcher command received');
+        recoverDesyncedState();
         if (!switcherActive) {
           openSwitcher();
+          // Command won the race; the matching keydown must not cycle.
+          ignoreNextKeydownCycle = true;
         } else if (ignoreNextCommandForward) {
           // This command is the same keypress the page already handled.
           ignoreNextCommandForward = false;
@@ -103,6 +128,41 @@ function attachKeyboardListeners() {
   window.addEventListener('keyup', handleKeyUp, true);
 }
 
+// Focus/visibility loses Alt keyup. Commit or dismiss so the overlay cannot stick.
+function attachLifecycleListeners() {
+  window.addEventListener('blur', handleWindowBlur, true);
+  document.addEventListener('visibilitychange', handleVisibilityChange, true);
+}
+
+function handleWindowBlur() {
+  if (!switcherActive) return;
+  // Keyup for Alt often never reaches this document after a focus change.
+  // Dismiss (do not commit) so a focus blip cannot switch tabs by surprise.
+  closeSwitcher();
+}
+
+function handleVisibilityChange() {
+  if (!switcherActive || document.visibilityState === 'visible') return;
+  closeSwitcher();
+}
+
+function altStillHeld(event) {
+  if (event && typeof event.altKey === 'boolean') return event.altKey;
+  if (typeof event?.getModifierState === 'function') {
+    return event.getModifierState('Alt');
+  }
+  return false;
+}
+
+function finishWithAltRelease() {
+  if (!switcherActive) return;
+  if (tabs.length === 0) {
+    commitWhenReady = true;
+    return;
+  }
+  commitSelection();
+}
+
 // Handle keydown events
 function handleKeyDown(event) {
   // event.code stays "KeyS" when Alt is held. On macOS, event.key becomes "ß".
@@ -114,16 +174,32 @@ function handleKeyDown(event) {
       event.stopPropagation();
       console.log('✓ Opening switcher');
       ignoreNextCommandForward = true;
+      altWasDown = true;
       openSwitcher();
     }
     return;
   }
+
+  // Escape dismisses the panel and leaves the current tab active.
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    event.stopPropagation();
+    closeSwitcher();
+    return;
+  }
+
+  if (event.altKey) altWasDown = true;
 
   // Alt stays held: S moves forward, Shift+S moves backward.
   // The browser command for Alt+S is the same keypress, so mark it handled.
   if (event.altKey && isS) {
     event.preventDefault();
     event.stopPropagation();
+    if (ignoreNextKeydownCycle) {
+      ignoreNextKeydownCycle = false;
+      ignoreNextCommandForward = true;
+      return;
+    }
     ignoreNextCommandForward = true;
     if (event.shiftKey) {
       console.log('← Cycling backward (Alt+Shift+S), index:', selectedIndex);
@@ -156,37 +232,46 @@ function handleKeyDown(event) {
     return;
   }
 
-  // Escape dismisses the panel and leaves the current tab active.
-  if (event.key === 'Escape') {
-    event.preventDefault();
-    event.stopPropagation();
-    closeSwitcher();
+  // Missed Alt keyup failsafe: a later non-navigation key without Alt commits.
+  if (altWasDown && !altStillHeld(event) && !isS) {
+    finishWithAltRelease();
   }
 }
 
 function handleKeyUp(event) {
-  if (event.key !== 'Alt' && event.code !== 'AltLeft' && event.code !== 'AltRight') return;
+  if (event.key !== 'Alt' && event.code !== 'AltLeft' && event.code !== 'AltRight') {
+    // Modifier state can clear without an Alt keyup on some OS/Chrome paths.
+    if (switcherActive && altWasDown && !altStillHeld(event)) {
+      finishWithAltRelease();
+    }
+    return;
+  }
   if (!switcherActive) return;
   event.preventDefault();
   event.stopPropagation();
-  // The list can still be loading. Commit after it renders.
-  if (tabs.length === 0) {
-    commitWhenReady = true;
-    return;
-  }
-  commitSelection();
+  altWasDown = false;
+  finishWithAltRelease();
 }
 
 function openSwitcher() {
-  switcherActive = true;
   selectedIndex = 1; // Start at the previous tab, not the one already showing.
   pendingMoves = 0;
-  if (mountOverlay()) {
-    const hint = document.createElement('div');
-    hint.className = 'keyboard-hint';
-    hint.textContent = 'Loading recent tabs…';
-    shadowRoot.appendChild(hint);
+  commitWhenReady = false;
+  pendingVisuals = null;
+  altWasDown = true;
+
+  if (!mountOverlay()) {
+    switcherActive = false;
+    return;
   }
+
+  switcherActive = true;
+  const hint = document.createElement('div');
+  hint.className = 'keyboard-hint';
+  hint.style.position = 'relative';
+  hint.style.zIndex = '1';
+  hint.textContent = 'Loading recent tabs…';
+  shadowRoot.appendChild(hint);
   requestMruData();
 }
 
@@ -219,11 +304,18 @@ function cycleForward() {
 
 // Request MRU tab data from background script
 function requestMruData() {
+  const requestId = ++mruRequestId;
   console.log('Requesting MRU data from background...');
   chrome.runtime.sendMessage(
     { action: 'getMruTabs' },
     async (response) => {
+      if (requestId !== mruRequestId) return;
       console.log('Received response:', response);
+      if (chrome.runtime.lastError) {
+        console.error('getMruTabs failed:', chrome.runtime.lastError.message);
+        closeSwitcher();
+        return;
+      }
       if (response && response.tabs) {
         tabs = response.tabs;
         console.log('MRU tabs:', tabs.length, 'tabs');
@@ -234,7 +326,7 @@ function requestMruData() {
           pendingMoves = 0;
         }
         
-        if (!switcherActive) return;
+        if (!switcherActive || requestId !== mruRequestId) return;
 
         if (tabs.length === 0) {
           showEmptyPanel();
@@ -247,7 +339,8 @@ function requestMruData() {
         }
         
         await renderSwitcherUI();
-        if (commitWhenReady && switcherActive) {
+        if (requestId !== mruRequestId || !switcherActive) return;
+        if (commitWhenReady) {
           commitWhenReady = false;
           commitSelection();
         }
@@ -272,21 +365,31 @@ function mountOverlay() {
     width: 100vw;
     height: 100vh;
     z-index: 2147483647;
-    pointer-events: none;
+    pointer-events: auto;
     display: flex;
     align-items: center;
     justify-content: center;
-    background: rgba(0, 0, 0, 0.6);
-    backdrop-filter: blur(8px);
+    background: rgba(0, 0, 0, 0.55);
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   `;
-
   // Closed mode keeps titles, URLs, and thumbnails out of page JS
   // (document.getElementById('tabctrl-overlay').shadowRoot is null).
   const shadow = host.attachShadow({ mode: 'closed' });
   const style = document.createElement('style');
   style.textContent = overlayCssText || FALLBACK_CSS;
   shadow.appendChild(style);
+
+  // Backdrop lives inside the shadow so hit-testing is not retargeted to the host.
+  const backdrop = document.createElement('div');
+  backdrop.className = 'tabctrl-backdrop';
+  backdrop.style.cssText = 'position:absolute;inset:0;pointer-events:auto;';
+  backdrop.addEventListener('mousedown', (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    closeSwitcher();
+  });
+  shadow.appendChild(backdrop);
+
   document.documentElement.appendChild(host);
   overlayElement = host;
   shadowRoot = shadow;
@@ -300,12 +403,17 @@ function mountOverlay() {
 }
 
 function showEmptyPanel() {
-  if (!mountOverlay()) return;
-  while (shadowRoot.childNodes.length > 1) {
+  if (!mountOverlay()) {
+    closeSwitcher();
+    return;
+  }
+  while (shadowRoot.childNodes.length > 2) {
     shadowRoot.removeChild(shadowRoot.lastChild);
   }
   const hint = document.createElement('div');
   hint.className = 'keyboard-hint';
+  hint.style.position = 'relative';
+  hint.style.zIndex = '1';
   hint.textContent = 'No recent tabs in this window yet';
   shadowRoot.appendChild(hint);
 }
@@ -315,18 +423,23 @@ async function renderSwitcherUI() {
   const generation = overlayGeneration;
   try {
     if (!document.documentElement || !switcherActive) return;
-    if (!mountOverlay()) return;
+    if (!mountOverlay()) {
+      closeSwitcher();
+      return;
+    }
     if (generation !== overlayGeneration || !switcherActive) return;
     if (!shadowRoot || !overlayElement) return;
 
-    // Clear existing content (keep the style element)
-    while (shadowRoot.childNodes.length > 1) {
+    // Clear existing content (keep style + backdrop)
+    while (shadowRoot.childNodes.length > 2) {
       shadowRoot.removeChild(shadowRoot.lastChild);
     }
     
     // Create switcher container
     const switcherContainer = document.createElement('div');
     switcherContainer.className = 'tabctrl-switcher';
+    switcherContainer.style.position = 'relative';
+    switcherContainer.style.zIndex = '1';
     
     // Create tab list
     const tabList = document.createElement('ul');
@@ -341,7 +454,7 @@ async function renderSwitcherUI() {
     // Create keyboard hint
     const hint = document.createElement('div');
     hint.className = 'keyboard-hint';
-    hint.textContent = 'Hold Alt • S forward • Shift+S back • release Alt to select • Esc to skip';
+    hint.textContent = 'Hold Alt • S forward • Shift+S back • release Alt to select • Esc or click outside to skip';
     
     // Assemble UI
     switcherContainer.appendChild(tabList);
@@ -350,7 +463,7 @@ async function renderSwitcherUI() {
     
     const selectedItem = shadowRoot.querySelector('.tab-item.selected');
     if (selectedItem) {
-      selectedItem.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      selectedItem.scrollIntoView({ block: 'nearest', behavior: 'auto' });
     }
     if (pendingVisuals) applyVisuals(pendingVisuals);
   } catch (error) {
@@ -505,7 +618,7 @@ function updateSelection() {
   tabItems.forEach((item, index) => {
     if (index === selectedIndex) {
       item.classList.add('selected');
-      item.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      item.scrollIntoView({ block: 'nearest', behavior: 'auto' });
     } else {
       item.classList.remove('selected');
     }
@@ -521,26 +634,22 @@ function commitSelection() {
   }
   
   const selectedTab = tabs[selectedIndex];
-  
-  // Send switch command to background
+  // Clear the overlay immediately so a slow tabs.update cannot leave it stuck.
+  const tabId = selectedTab.id;
+  closeSwitcher();
+
   chrome.runtime.sendMessage(
     { 
       action: 'switchToTab',
-      tabId: selectedTab.id
+      tabId
     },
     (response) => {
+      if (chrome.runtime.lastError) {
+        console.error('Failed to switch tab:', chrome.runtime.lastError.message);
+        return;
+      }
       if (response && !response.success) {
         console.error('Failed to switch tab:', response.error);
-        // Remove invalid tab from list and try next one
-        tabs.splice(selectedIndex, 1);
-        if (tabs.length > 0) {
-          selectedIndex = Math.min(selectedIndex, tabs.length - 1);
-          renderSwitcherUI();
-        } else {
-          closeSwitcher();
-        }
-      } else {
-        closeSwitcher();
       }
     }
   );
@@ -549,27 +658,35 @@ function commitSelection() {
 // Close a tab
 function closeTab(tabId) {
   console.log('Closing tab:', tabId);
-  
-  // Send message to background to close the tab
+
   chrome.runtime.sendMessage(
     { action: 'closeTab', tabId: tabId },
     (response) => {
-      // Remove tab from local list
-      const tabIndex = tabs.findIndex(t => t.id === tabId);
-      if (tabIndex !== -1) {
-        tabs.splice(tabIndex, 1);
-        
-        // Adjust selected index if needed
-        if (selectedIndex >= tabs.length) {
-          selectedIndex = Math.max(0, tabs.length - 1);
-        }
-        
-        // Re-render or close if no tabs left
-        if (tabs.length === 0) {
-          closeSwitcher();
-        } else {
-          renderSwitcherUI();
-        }
+      if (chrome.runtime.lastError) {
+        console.error('Failed to close tab:', chrome.runtime.lastError.message);
+        return;
+      }
+      if (!response?.success) {
+        console.error('Failed to close tab:', response?.error || 'unknown error');
+        return;
+      }
+
+      const tabIndex = tabs.findIndex((t) => t.id === tabId);
+      if (tabIndex === -1) return;
+
+      tabs.splice(tabIndex, 1);
+
+      if (tabIndex < selectedIndex) {
+        selectedIndex -= 1;
+      }
+      if (selectedIndex >= tabs.length) {
+        selectedIndex = Math.max(0, tabs.length - 1);
+      }
+
+      if (tabs.length === 0) {
+        closeSwitcher();
+      } else {
+        renderSwitcherUI();
       }
     }
   );
@@ -579,8 +696,11 @@ function closeTab(tabId) {
 function closeSwitcher() {
   commitWhenReady = false;
   ignoreNextCommandForward = false;
+  ignoreNextKeydownCycle = false;
   pendingMoves = 0;
   pendingVisuals = null;
+  altWasDown = false;
+  mruRequestId++;
   overlayGeneration++;
   if (overlayElement) {
     overlayElement.remove();

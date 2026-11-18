@@ -5,6 +5,9 @@ let tabs = [];
 let selectedIndex = 1;
 let lastForwardAt = 0;
 const openedAt = Date.now();
+let altSeen = false;
+let commitWhenReady = false;
+let closed = false;
 
 function domainOf(url) {
   try {
@@ -85,7 +88,7 @@ function render() {
   root.append(list, hint);
 
   const selected = root.querySelector('.tab-item.selected');
-  if (selected) selected.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  if (selected) selected.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'auto' });
 }
 
 function applyVisuals(visuals) {
@@ -114,7 +117,18 @@ function forward() {
   cycle(1);
 }
 
+function finishWithAltRelease() {
+  if (closed) return;
+  if (tabs.length === 0) {
+    commitWhenReady = true;
+    return;
+  }
+  commit();
+}
+
 function commit() {
+  if (closed) return;
+  closed = true;
   const tab = tabs[selectedIndex];
   if (!tab) {
     window.close();
@@ -123,14 +137,30 @@ function commit() {
   chrome.runtime.sendMessage({ action: 'switchToTab', tabId: tab.id }, () => {
     window.close();
   });
+  // Close immediately so a slow switch cannot leave the popup stranded.
+  setTimeout(() => {
+    try { window.close(); } catch (error) { /* ignore */ }
+  }, 0);
 }
 
 chrome.runtime.onMessage.addListener((request) => {
-  if (request.action === 'popupCycle') forward();
+  if (request.action === 'popupCycle') {
+    altSeen = true;
+    forward();
+  }
   if (request.action === 'updateVisuals') applyVisuals(request.visuals);
 });
 
 window.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    closed = true;
+    window.close();
+    return;
+  }
+
+  if (event.altKey) altSeen = true;
+
   const isS = event.code === 'KeyS' && !event.metaKey && !event.ctrlKey;
   if (isS && event.shiftKey) {
     event.preventDefault();
@@ -159,20 +189,49 @@ window.addEventListener('keydown', (event) => {
     commit();
     return;
   }
-  if (event.key === 'Escape') {
-    event.preventDefault();
-    window.close();
+
+  // Missed Alt keyup: a later non-navigation key without Alt commits.
+  if (altSeen && !event.altKey && !isS) {
+    finishWithAltRelease();
   }
 });
 
 window.addEventListener('keyup', (event) => {
   if (event.key === 'Alt' || event.code === 'AltLeft' || event.code === 'AltRight') {
-    commit();
+    finishWithAltRelease();
+    return;
+  }
+  if (altSeen && !event.altKey) {
+    finishWithAltRelease();
   }
 });
+
+// Popup create is slow enough that Alt is often already released before focus.
+// Blur dismisses without switching; click / Enter / Alt keyup still commit.
+window.addEventListener('blur', () => {
+  if (closed) return;
+  closed = true;
+  window.close();
+});
+
+let pointerSeen = false;
+window.addEventListener('pointerdown', () => { pointerSeen = true; }, true);
+window.addEventListener('mousemove', () => { pointerSeen = true; }, { once: true, capture: true });
 
 chrome.runtime.sendMessage({ action: 'getMruTabs', windowId: browserWindowId }, (response) => {
   tabs = response?.tabs || [];
   selectedIndex = tabs.length > 1 ? 1 : 0;
   render();
+  if (commitWhenReady) {
+    commitWhenReady = false;
+    commit();
+    return;
+  }
+  // Quick Alt+S tap: keyup usually fired on the previous page before this
+  // popup focused. If the user is not holding Alt or aiming with the pointer,
+  // complete the common “go to previous tab” gesture.
+  setTimeout(() => {
+    if (closed || altSeen || pointerSeen) return;
+    finishWithAltRelease();
+  }, 280);
 });
