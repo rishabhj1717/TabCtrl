@@ -448,12 +448,9 @@ async function getEnrichedMruTabs(windowId, activeTabId) {
       list = list.slice(0, maxMruSize);
     }
   }
+  // Keep the active tab first in memory only. Persisting on every open was
+  // adding storage I/O to the Alt+S hot path.
   setMruList(windowId, list);
-  saveMruToStorage();
-
-  if (thumbnailCache.size === 0) {
-    await loadThumbnails();
-  }
 
   const lookedUp = await Promise.all(list.map(async (tabId) => {
     try {
@@ -480,6 +477,13 @@ async function getEnrichedMruTabs(windowId, activeTabId) {
   }
 
   return enrichedTabs;
+}
+
+// Session thumbnail reload stays off the first-paint path. Empty cache still
+// answers immediately with placeholders; visuals fill in afterward.
+function ensureThumbnailsLoaded() {
+  if (thumbnailCache.size > 0) return Promise.resolve();
+  return loadThumbnails();
 }
 
 function deliverVisuals(visuals, targetTabId) {
@@ -525,7 +529,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       .then(tabs => {
         const payload = tabs.map(({ sourceFavIcon, ...tab }) => tab);
         sendResponse({ tabs: payload });
-        refreshVisuals(sender.tab?.id, tabs);
+        ensureThumbnailsLoaded()
+          .then(() => refreshVisuals(sender.tab?.id, tabs))
+          .catch(() => refreshVisuals(sender.tab?.id, tabs));
       })
       .catch(error => {
         console.error('Error getting MRU tabs:', error);
@@ -589,16 +595,18 @@ chrome.windows.onRemoved.addListener((windowId) => {
   }
 });
 
-async function focusSwitcherWindow() {
+async function focusSwitcherWindow(cycle = true) {
   await chrome.windows.update(switcherWindowId, { focused: true });
-  chrome.runtime.sendMessage({ action: 'popupCycle' }).catch(() => {});
+  if (cycle) {
+    chrome.runtime.sendMessage({ action: 'popupCycle' }).catch(() => {});
+  }
 }
 
 async function openSwitcherWindow(browserWindowId) {
   if (switcherWindowId != null) {
     try {
       await chrome.windows.get(switcherWindowId);
-      await focusSwitcherWindow();
+      await focusSwitcherWindow(true);
       return;
     } catch (error) {
       switcherWindowId = null;
@@ -638,7 +646,8 @@ chrome.commands.onCommand.addListener(async (command) => {
       if (switcherWindowId != null) {
         try {
           await chrome.windows.get(switcherWindowId);
-          await focusSwitcherWindow();
+          // A second Alt+S while the popup is up advances; Esc / Alt release closes.
+          await focusSwitcherWindow(true);
           return;
         } catch (error) {
           switcherWindowId = null;
