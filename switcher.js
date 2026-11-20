@@ -5,9 +5,11 @@ let tabs = [];
 let selectedIndex = 1;
 let lastForwardAt = 0;
 const openedAt = Date.now();
-let altSeen = false;
+let holdSeen = false;
 let commitWhenReady = false;
 let closed = false;
+let hotkey = TabCtrlShared.DEFAULT;
+let panelColor = 'auto';
 
 function domainOf(url) {
   try {
@@ -19,6 +21,7 @@ function domainOf(url) {
 
 function render() {
   root.replaceChildren();
+  TabCtrlShared.applyTheme(root, panelColor);
   if (tabs.length === 0) {
     const hint = document.createElement('div');
     hint.className = 'keyboard-hint';
@@ -31,6 +34,7 @@ function render() {
 
   const list = document.createElement('ul');
   list.className = 'tab-list';
+  list.style.setProperty('--tc-cols', String(TabCtrlShared.columnsFor(tabs.length)));
   tabs.forEach((tab, index) => {
     const domain = domainOf(tab.url);
     const item = document.createElement('li');
@@ -40,18 +44,11 @@ function render() {
     const preview = document.createElement('div');
     preview.className = 'tab-preview';
     if (tab.thumbnail && tab.thumbnail.startsWith('data:')) {
-      const img = document.createElement('img');
-      img.src = tab.thumbnail;
-      img.alt = '';
-      img.style.cssText = 'width: 100%; height: 100%; object-fit: cover;';
-      preview.appendChild(img);
+      TabCtrlShared.showPreviewShot(preview, tab.thumbnail);
+    } else if (tab.favIconUrl && tab.favIconUrl.startsWith('data:')) {
+      TabCtrlShared.showPreviewIcon(preview, tab.favIconUrl);
     } else {
-      const placeholder = document.createElement('div');
-      placeholder.className = 'tab-preview-placeholder';
-      placeholder.textContent = domain.charAt(0).toUpperCase() || 'P';
-      const hue = domain.split('').reduce((sum, char) => sum + char.charCodeAt(0), 0) % 360;
-      placeholder.style.background = `linear-gradient(135deg, hsl(${hue}, 60%, 50%), hsl(${hue + 40}, 60%, 60%))`;
-      preview.appendChild(placeholder);
+      preview.appendChild(TabCtrlShared.letterPlaceholder(domain));
     }
 
     const favicon = document.createElement('img');
@@ -60,7 +57,7 @@ function render() {
     if (tab.favIconUrl && tab.favIconUrl.startsWith('data:')) {
       favicon.src = tab.favIconUrl;
     } else {
-      favicon.style.display = 'none';
+      favicon.style.visibility = 'hidden';
     }
 
     const info = document.createElement('div');
@@ -84,11 +81,10 @@ function render() {
 
   const hint = document.createElement('div');
   hint.className = 'keyboard-hint';
-  hint.textContent = 'Hold Alt • S forward • Shift+S back • release Alt to select • Esc to skip';
+  hint.textContent = TabCtrlShared.hint(hotkey);
   root.append(list, hint);
 
-  const selected = root.querySelector('.tab-item.selected');
-  if (selected) selected.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'auto' });
+  TabCtrlShared.revealItem(root, root.querySelector('.tab-item.selected'));
 }
 
 function applyVisuals(visuals) {
@@ -107,9 +103,12 @@ function applyVisuals(visuals) {
 function cycle(step) {
   if (tabs.length === 0) return;
   selectedIndex = (selectedIndex + step + tabs.length) % tabs.length;
-  render();
+  const items = root.querySelectorAll('.tab-item');
+  items.forEach((item, index) => item.classList.toggle('selected', index === selectedIndex));
+  TabCtrlShared.revealItem(root, items[selectedIndex]);
 }
 
+// The popup can see the same press as a keydown and as a relayed command.
 function forward() {
   const now = Date.now();
   if (now - lastForwardAt < 80) return;
@@ -117,7 +116,7 @@ function forward() {
   cycle(1);
 }
 
-function finishWithAltRelease() {
+function finishWithHoldRelease() {
   if (closed) return;
   if (tabs.length === 0) {
     commitWhenReady = true;
@@ -145,7 +144,7 @@ function commit() {
 
 chrome.runtime.onMessage.addListener((request) => {
   if (request.action === 'popupCycle') {
-    altSeen = true;
+    holdSeen = true;
     forward();
   }
   if (request.action === 'updateVisuals') applyVisuals(request.visuals);
@@ -159,16 +158,16 @@ window.addEventListener('keydown', (event) => {
     return;
   }
 
-  if (event.altKey) altSeen = true;
+  if (TabCtrlShared.isHoldHeld(hotkey, event)) holdSeen = true;
 
-  const isS = event.code === 'KeyS' && !event.metaKey && !event.ctrlKey;
-  if (isS && event.shiftKey) {
+  const direction = TabCtrlShared.cycleDirection(hotkey, event);
+  if (direction < 0) {
     event.preventDefault();
     lastForwardAt = Date.now();
     cycle(-1);
     return;
   }
-  if (isS) {
+  if (direction > 0) {
     event.preventDefault();
     if (Date.now() - openedAt < 300) return;
     forward();
@@ -190,24 +189,24 @@ window.addEventListener('keydown', (event) => {
     return;
   }
 
-  // Missed Alt keyup: a later non-navigation key without Alt commits.
-  if (altSeen && !event.altKey && !isS) {
-    finishWithAltRelease();
+  // Missed modifier keyup: a later non-navigation key without it commits.
+  if (holdSeen && !TabCtrlShared.isHoldHeld(hotkey, event) && event.code !== hotkey?.code) {
+    finishWithHoldRelease();
   }
 });
 
 window.addEventListener('keyup', (event) => {
-  if (event.key === 'Alt' || event.code === 'AltLeft' || event.code === 'AltRight') {
-    finishWithAltRelease();
+  if (TabCtrlShared.isHoldKeyEvent(hotkey, event)) {
+    finishWithHoldRelease();
     return;
   }
-  if (altSeen && !event.altKey) {
-    finishWithAltRelease();
+  if (holdSeen && !TabCtrlShared.isHoldHeld(hotkey, event)) {
+    finishWithHoldRelease();
   }
 });
 
-// Popup create is slow enough that Alt is often already released before focus.
-// Blur dismisses without switching; click / Enter / Alt keyup still commit.
+// Popup create is slow enough that the modifier is often already released before focus.
+// Blur dismisses without switching; click / Enter / modifier keyup still commit.
 window.addEventListener('blur', () => {
   if (closed) return;
   closed = true;
@@ -218,20 +217,25 @@ let pointerSeen = false;
 window.addEventListener('pointerdown', () => { pointerSeen = true; }, true);
 window.addEventListener('mousemove', () => { pointerSeen = true; }, { once: true, capture: true });
 
-chrome.runtime.sendMessage({ action: 'getMruTabs', windowId: browserWindowId }, (response) => {
-  tabs = response?.tabs || [];
-  selectedIndex = tabs.length > 1 ? 1 : 0;
-  render();
-  if (commitWhenReady) {
-    commitWhenReady = false;
-    commit();
-    return;
-  }
-  // Quick Alt+S tap: keyup usually fired on the previous page before this
-  // popup focused. If the user is not holding Alt or aiming with the pointer,
-  // complete the common “go to previous tab” gesture.
-  setTimeout(() => {
-    if (closed || altSeen || pointerSeen) return;
-    finishWithAltRelease();
-  }, 280);
+chrome.storage.local.get(['hotkey', 'panelColor'], (settings) => {
+  hotkey = TabCtrlShared.fromStorage(settings?.hotkey);
+  panelColor = settings?.panelColor || 'auto';
+
+  chrome.runtime.sendMessage({ action: 'getMruTabs', windowId: browserWindowId }, (response) => {
+    tabs = response?.tabs || [];
+    selectedIndex = tabs.length > 1 ? 1 : 0;
+    render();
+    if (commitWhenReady) {
+      commitWhenReady = false;
+      commit();
+      return;
+    }
+    // Quick shortcut tap: keyup usually fired on the previous page before this
+    // popup focused. If the user is not holding the modifier or aiming with the
+    // pointer, complete the common “go to previous tab” gesture.
+    setTimeout(() => {
+      if (closed || holdSeen || pointerSeen) return;
+      finishWithHoldRelease();
+    }, 280);
+  });
 });

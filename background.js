@@ -5,6 +5,12 @@
 let mruByWindow = Object.create(null);
 let maxMruSize = 5;
 let isInitialized = false;
+// Tab currently showing the in-page switcher, so repeat presses skip the lookup.
+let overlayTabId = null;
+// When the last switch happened. Chrome can deliver a queued shortcut press
+// after the modifier was released; that press must not reopen the switcher.
+let lastSwitchAt = 0;
+const LATE_PRESS_MS = 350;
 
 function normalizeMaxMruSize(value) {
   return Number(value) === 10 ? 10 : 5;
@@ -143,6 +149,8 @@ function isScriptableUrl(url) {
   return !blocked.some((prefix) => url.startsWith(prefix)) && !isStoreUrl(url);
 }
 
+const CONTENT_SCRIPT_FILES = ['shared.js', 'content.js'];
+
 // Inject into tabs that were already open. Parallel, so a window with 100+
 // tabs does not stall the shortcut behind a one-by-one walk.
 async function injectContentScripts() {
@@ -155,7 +163,7 @@ async function injectContentScripts() {
         try {
           await chrome.scripting.executeScript({
             target: { tabId: tab.id },
-            files: ['content.js']
+            files: CONTENT_SCRIPT_FILES
           });
         } catch (error) {
           // Restricted pages and discarded tabs can refuse injection.
@@ -177,10 +185,29 @@ async function ensureContentScript(tabId) {
   }
   await chrome.scripting.executeScript({
     target: { tabId },
-    files: ['content.js']
+    files: CONTENT_SCRIPT_FILES
   });
   return true;
 }
+
+// The shortcut is chosen in chrome://extensions/shortcuts and Chrome has no
+// change event for it, so it is re-read whenever the user is likely back from there.
+let syncedHotkey;
+
+async function syncHotkey() {
+  try {
+    const commands = await chrome.commands.getAll();
+    const command = commands.find((item) => item.name === 'toggle-tab-switcher');
+    const shortcut = command?.shortcut || '';
+    if (shortcut === syncedHotkey) return;
+    syncedHotkey = shortcut;
+    await chrome.storage.local.set({ hotkey: shortcut });
+  } catch (error) {
+    console.log('Could not read shortcut:', error?.message || error);
+  }
+}
+
+syncHotkey();
 
 // Initialize on service worker startup
 chrome.runtime.onInstalled.addListener(async (details) => {
@@ -230,8 +257,16 @@ chrome.tabs.onActivated.addListener(async (activeInfo) => {
 
   console.log('MRU updated for window', windowId, ':', list);
 
+  if (overlayTabId != null && overlayTabId !== tabId) overlayTabId = null;
+  syncHotkey();
   await saveMruToStorage();
   scheduleThumbnailCapture(windowId, tabId);
+});
+
+// A tab activated while still loading would otherwise keep a blank preview.
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.status !== 'complete' || !tab.active) return;
+  scheduleThumbnailCapture(tab.windowId, tabId);
 });
 
 // Clean up removed tabs from the window's MRU list
@@ -247,6 +282,7 @@ chrome.tabs.onRemoved.addListener(async (tabId, removeInfo) => {
     }
   }
   thumbnailCache.delete(tabId);
+  if (tabId === overlayTabId) overlayTabId = null;
   console.log('Tab removed from MRU:', tabId);
   await saveMruToStorage();
   persistThumbnails();
@@ -382,6 +418,8 @@ async function captureActiveThumbnail(windowId, expectedTabId) {
   const [active] = await chrome.tabs.query({ active: true, windowId });
   if (!active || !canCaptureUrl(active.url)) return null;
   if (expectedTabId && active.id !== expectedTabId) return null;
+  // The screenshot would show the switcher itself.
+  if (active.id === overlayTabId) return null;
 
   const shot = await chrome.tabs.captureVisibleTab(windowId, {
     format: 'jpeg',
@@ -465,7 +503,7 @@ async function getEnrichedMruTabs(windowId, activeTabId) {
     if (!tab || (windowId && tab.windowId !== windowId)) continue;
     const cachedIcon = tab.favIconUrl && faviconDataUrls.has(tab.favIconUrl)
       ? faviconDataUrls.get(tab.favIconUrl)
-      : DEFAULT_FAVICON;
+      : null;
     enrichedTabs.push({
       id: tab.id,
       title: tab.title || 'Untitled',
@@ -497,11 +535,14 @@ function deliverVisuals(visuals, targetTabId) {
 
 // Icons and any missing preview fill in after the panel is already open.
 function refreshVisuals(targetTabId, tabs) {
-  Promise.all(tabs.map(async (tab) => ({
-    id: tab.id,
-    favIconUrl: await faviconToDataUrl(tab.sourceFavIcon),
-    thumbnail: thumbnailCache.get(tab.id) || null
-  }))).then((visuals) => {
+  Promise.all(tabs.map(async (tab) => {
+    const icon = await faviconToDataUrl(tab.sourceFavIcon);
+    return {
+      id: tab.id,
+      favIconUrl: icon === DEFAULT_FAVICON ? null : icon,
+      thumbnail: thumbnailCache.get(tab.id) || null
+    };
+  })).then((visuals) => {
     deliverVisuals(visuals, targetTabId);
   }).catch((error) => {
     console.log('Visual refresh failed:', error?.message || error);
@@ -518,7 +559,13 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   // Handle getMruTabs action
+  if (request.action === 'switcherClosed') {
+    if (sender.tab?.id === overlayTabId) overlayTabId = null;
+    return false;
+  }
+
   if (request.action === 'getMruTabs') {
+    if (sender.tab?.id) overlayTabId = sender.tab.id;
     const windowId = request.windowId || sender.tab?.windowId || chrome.windows.WINDOW_ID_CURRENT;
     const resolveActiveTab = sender.tab?.id
       ? Promise.resolve(sender.tab.id)
@@ -544,6 +591,8 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   // Handle switchToTab action
   if (request.action === 'switchToTab') {
     const tabId = request.tabId;
+    overlayTabId = null;
+    lastSwitchAt = Date.now();
 
     chrome.tabs.update(tabId, { active: true })
       .then(() => {
@@ -613,12 +662,15 @@ async function openSwitcherWindow(browserWindowId) {
     }
   }
 
+  // Five 180px cards per row; a second row when the list holds more than five.
   let left = 80;
   let top = 80;
-  const width = 980;
-  const height = 460;
+  let width = 1040;
+  let height = maxMruSize > 5 ? 540 : 340;
   try {
     const parent = await chrome.windows.get(browserWindowId);
+    width = Math.min(width, parent.width || width);
+    height = Math.min(height, parent.height || height);
     left = Math.max(0, Math.round((parent.left || 0) + ((parent.width || width) - width) / 2));
     top = Math.max(0, Math.round((parent.top || 0) + ((parent.height || height) - height) / 2));
   } catch (error) {
@@ -641,8 +693,23 @@ async function openSwitcherWindow(browserWindowId) {
 chrome.commands.onCommand.addListener(async (command) => {
   if (command === 'toggle-tab-switcher') {
     console.log('Tab switcher command triggered');
+    syncHotkey();
 
     try {
+      // Fast path while the in-page switcher is open: one message, no lookups.
+      if (overlayTabId != null) {
+        try {
+          await chrome.tabs.sendMessage(overlayTabId, { action: 'showSwitcher' });
+          return;
+        } catch (error) {
+          overlayTabId = null;
+        }
+      }
+
+      // A press queued behind the one that just switched tabs, delivered after
+      // the modifier was released. Opening now would strand a panel on the new tab.
+      if (Date.now() - lastSwitchAt < LATE_PRESS_MS) return;
+
       if (switcherWindowId != null) {
         try {
           await chrome.windows.get(switcherWindowId);
