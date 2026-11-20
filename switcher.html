@@ -17,13 +17,22 @@
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
     }
     .tabctrl-switcher {
-      min-width: 0;
-      max-width: calc(100vw - 32px);
+      position: relative;
+      display: grid;
+      align-content: safe center;
+      justify-content: safe center;
+      box-shadow: none;
+      border-radius: 0;
+      width: 100%;
+      height: 100%;
+      max-width: none;
+      max-height: none;
     }
   </style>
 </head>
 <body>
   <div id="switcher" class="tabctrl-switcher"></div>
+  <script src="shared.js"></script>
   <script src="switcher.js"></script>
 </body>
 </html>

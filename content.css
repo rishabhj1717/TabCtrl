@@ -1,5 +1,6 @@
 /* TabCtrl Overlay Styles */
-/* High z-index orchestration to guarantee top-layer rendering */
+/* Colors follow Chrome's light/dark mode. A custom panel color from the
+   options page overrides the --tc-* variables inline. */
 
 #tabctrl-overlay {
   position: fixed;
@@ -17,34 +18,41 @@
 }
 
 .tabctrl-switcher {
+  --tc-panel: #f1f3f4;
+  --tc-card: #ffffff;
+  --tc-card-hover: #e8eaed;
+  --tc-text: #1f1f1f;
+  --tc-subtext: #5f6368;
+  --tc-ring: #0b57d0;
+  --tc-divider: rgba(0, 0, 0, 0.12);
+
   pointer-events: auto; /* Enable interaction on switcher only */
-  background: linear-gradient(135deg, rgba(100, 120, 200, 0.95) 0%, rgba(80, 100, 180, 0.95) 100%);
+  box-sizing: border-box;
+  background: var(--tc-panel);
+  color: var(--tc-text);
   border-radius: 16px;
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
-  padding: 20px;
-  min-width: 600px;
-  max-width: 90vw;
-  max-height: 80vh;
+  padding: 16px;
+  max-width: 92vw;
+  max-height: 86vh;
   overflow-x: hidden;
   overflow-y: auto;
+  scrollbar-width: none;
 }
 
-/* Dark mode support */
+.tabctrl-switcher::-webkit-scrollbar {
+  display: none;
+}
+
 @media (prefers-color-scheme: dark) {
   .tabctrl-switcher {
-    background: linear-gradient(135deg, rgba(60, 70, 100, 0.95) 0%, rgba(40, 50, 80, 0.95) 100%);
-  }
-  
-  .tab-item {
-    background: rgba(50, 50, 60, 0.9);
-  }
-  
-  .tab-title {
-    color: #fff;
-  }
-  
-  .tab-url {
-    color: rgba(255, 255, 255, 0.6);
+    --tc-panel: #202124;
+    --tc-card: #35363a;
+    --tc-card-hover: #3c4043;
+    --tc-text: #e8eaed;
+    --tc-subtext: #9aa0a6;
+    --tc-ring: #a8c7fa;
+    --tc-divider: rgba(255, 255, 255, 0.16);
   }
 }
 
@@ -52,53 +60,51 @@
   list-style: none;
   padding: 0;
   margin: 0;
-  display: flex;
-  flex-direction: row;
-  gap: 16px;
-  overflow-x: auto;
-  overflow-y: hidden;
-  padding-bottom: 10px;
+  display: grid;
+  grid-template-columns: repeat(var(--tc-cols, 5), minmax(0, 180px));
+  gap: 12px;
+  justify-content: center;
 }
 
 .tab-item {
+  box-sizing: border-box;
   display: flex;
   flex-direction: column;
   align-items: center;
-  min-width: 200px;
-  max-width: 200px;
-  background: rgba(255, 255, 255, 0.95);
+  min-width: 0;
+  background: var(--tc-card);
   border-radius: 12px;
-  padding: 12px;
+  padding: 10px;
   cursor: pointer;
-  transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+  transition: background-color 0.12s ease, border-color 0.12s ease;
+  /* The ring sits inside the card so it is never clipped by the panel edge. */
   border: 3px solid transparent;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
   position: relative;
 }
 
 .tab-item:hover {
-  transform: translateY(-4px);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+  background: var(--tc-card-hover);
 }
 
 .tab-item.selected {
-  border-color: #ff4444;
-  transform: translateY(-4px) scale(1.05);
-  box-shadow: 0 12px 32px rgba(255, 68, 68, 0.4);
+  border-color: var(--tc-ring);
+  background: var(--tc-card-hover);
 }
 
 .tab-preview {
   width: 100%;
-  height: 120px;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  aspect-ratio: 16 / 10;
+  min-height: 0;
+  flex-shrink: 0;
+  background: var(--tc-card-hover);
   border-radius: 8px;
-  margin-bottom: 10px;
+  margin-bottom: 8px;
   display: flex;
   align-items: center;
   justify-content: center;
   overflow: hidden;
   position: relative;
-  border: 2px solid rgba(255, 255, 255, 0.1);
 }
 
 .tab-preview img {
@@ -108,23 +114,32 @@
 }
 
 .tab-preview-placeholder {
-  font-size: 56px;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 48px;
   font-weight: bold;
   color: white;
   text-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
-  opacity: 0.9;
+}
+
+/* Tabs without a screenshot yet show their site icon large. */
+.tab-preview img.tab-preview-icon {
+  width: 32%;
+  height: auto;
+  aspect-ratio: 1;
+  object-fit: contain;
+  border-radius: 10px;
 }
 
 .tab-favicon {
-  width: 24px;
-  height: 24px;
-  margin-bottom: 6px;
+  width: 20px;
+  height: 20px;
+  margin-bottom: 4px;
   flex-shrink: 0;
   border-radius: 4px;
-}
-
-.tab-favicon-error {
-  display: none;
 }
 
 .tab-info {
@@ -132,7 +147,7 @@
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 4px;
+  gap: 2px;
 }
 
 .tab-title {
@@ -142,18 +157,17 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  color: #333;
+  color: var(--tc-text);
   width: 100%;
 }
 
 .tab-url {
-  font-size: 10px;
-  opacity: 0.6;
+  font-size: 11px;
   text-align: center;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  color: #666;
+  color: var(--tc-subtext);
   width: 100%;
 }
 
@@ -166,8 +180,8 @@
   color: white;
   background: rgba(0, 0, 0, 0.5);
   border-radius: 50%;
-  width: 24px;
-  height: 24px;
+  width: 22px;
+  height: 22px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -177,9 +191,9 @@
   position: absolute;
   top: 8px;
   right: 8px;
-  width: 24px;
-  height: 24px;
-  background: #ff4444;
+  width: 22px;
+  height: 22px;
+  background: #d93025;
   border-radius: 50%;
   color: white;
   font-size: 16px;
@@ -200,36 +214,9 @@
 .keyboard-hint {
   text-align: center;
   font-size: 12px;
-  color: rgba(255, 255, 255, 0.9);
+  color: var(--tc-subtext, rgba(255, 255, 255, 0.9));
   margin-top: 12px;
   padding-top: 12px;
-  border-top: 1px solid rgba(255, 255, 255, 0.2);
+  border-top: 1px solid var(--tc-divider, rgba(255, 255, 255, 0.2));
   font-weight: 500;
-}
-
-@media (prefers-color-scheme: dark) {
-  .keyboard-hint {
-    color: rgba(255, 255, 255, 0.9);
-    border-top-color: rgba(255, 255, 255, 0.2);
-  }
-}
-
-/* Smooth scrollbar */
-.tabctrl-switcher::-webkit-scrollbar {
-  width: 8px;
-}
-
-.tabctrl-switcher::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.tabctrl-switcher::-webkit-scrollbar-thumb {
-  background: rgba(0, 0, 0, 0.2);
-  border-radius: 4px;
-}
-
-@media (prefers-color-scheme: dark) {
-  .tabctrl-switcher::-webkit-scrollbar-thumb {
-    background: rgba(255, 255, 255, 0.2);
-  }
 }

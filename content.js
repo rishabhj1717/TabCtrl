@@ -21,34 +21,74 @@ let overlayGeneration = 0;
 let mruRequestId = 0;
 let overlayCssText = '';
 let commitWhenReady = false;
-let ignoreNextCommandForward = false;
-// When the extension command opens the panel before keydown, the same Alt+S
-// keydown must not advance the highlight.
-let ignoreNextKeydownCycle = false;
 let pendingMoves = 0;
 let pendingVisuals = null;
-let altWasDown = false;
+let holdWasDown = false;
+let hotkey = TabCtrlShared.DEFAULT;
+let panelColor = 'auto';
+
+// One shortcut press can arrive twice: as a page keydown and as the Chrome
+// command relayed by the background, in either order. Each source records its
+// presses; a press from the other source within the window is the same one.
+const PAIR_WINDOW_MS = 400;
+let keyPresses = [];
+let commandPresses = [];
 
 const FALLBACK_CSS = `
   .tabctrl-switcher {
     pointer-events: auto;
-    background: linear-gradient(135deg, rgba(100, 120, 200, 0.95) 0%, rgba(80, 100, 180, 0.95) 100%);
+    background: var(--tc-panel, #202124);
+    color: var(--tc-text, #e8eaed);
     border-radius: 16px;
-    padding: 20px;
-    max-width: 90vw;
+    padding: 16px;
+    max-width: 92vw;
+    max-height: 86vh;
+    overflow-y: auto;
+    scrollbar-width: none;
     box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
   }
-  .tab-list { display: flex; gap: 16px; list-style: none; padding: 0; margin: 0; }
-  .tab-item { background: white; border-radius: 12px; padding: 12px; min-width: 200px; cursor: pointer; }
+  .tab-list { display: grid; grid-template-columns: repeat(var(--tc-cols, 5), minmax(0, 180px)); gap: 12px; list-style: none; padding: 0; margin: 0; }
+  .tab-item { background: var(--tc-card, #35363a); border: 3px solid transparent; border-radius: 12px; padding: 10px; cursor: pointer; }
+  .tab-item.selected { border-color: var(--tc-ring, #a8c7fa); }
 `;
 
 // Initialize content script. CSS is loaded lazily on first overlay open
 // so every navigation does not wake the service worker.
 function init() {
   console.log('TabCtrl content script loaded');
+  loadSettings();
   attachKeyboardListeners();
   attachLifecycleListeners();
   attachMessageListener();
+}
+
+// Storage reads do not wake the service worker.
+function loadSettings() {
+  chrome.storage.local.get(['hotkey', 'panelColor'], (result) => {
+    if (chrome.runtime.lastError || !result) return;
+    hotkey = TabCtrlShared.fromStorage(result.hotkey);
+    panelColor = result.panelColor || 'auto';
+  });
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== 'local') return;
+    if (changes.hotkey) hotkey = TabCtrlShared.fromStorage(changes.hotkey.newValue);
+    if (changes.panelColor) panelColor = changes.panelColor.newValue || 'auto';
+  });
+}
+
+// Returns false when this press was already handled through the other source.
+function claimPress(source) {
+  const now = performance.now();
+  const mine = source === 'key' ? keyPresses : commandPresses;
+  const other = source === 'key' ? commandPresses : keyPresses;
+  while (other.length && now - other[0] > PAIR_WINDOW_MS) other.shift();
+  if (other.length) {
+    other.shift();
+    return false;
+  }
+  while (mine.length && now - mine[0] > PAIR_WINDOW_MS) mine.shift();
+  mine.push(now);
+  return true;
 }
 
 // CSS is read by the service worker and sent as text. Fetching
@@ -73,8 +113,6 @@ function recoverDesyncedState() {
     switcherActive = false;
     tabs = [];
     commitWhenReady = false;
-    ignoreNextCommandForward = false;
-    ignoreNextKeydownCycle = false;
     pendingMoves = 0;
     pendingVisuals = null;
   }
@@ -94,14 +132,9 @@ function attachMessageListener() {
         console.log('Show switcher command received');
         recoverDesyncedState();
         if (!switcherActive) {
-          openSwitcher();
-          // Command won the race; the matching keydown must not cycle.
-          ignoreNextKeydownCycle = true;
-        } else if (ignoreNextCommandForward) {
-          // This command is the same keypress the page already handled.
-          ignoreNextCommandForward = false;
-        } else {
-          // Chrome consumes Alt+S, so a press often arrives only as this command.
+          openSwitcher('command');
+        } else if (claimPress('command')) {
+          // Chrome often consumes the shortcut, so a press may arrive only as this command.
           cycleForward();
         }
         sendResponse({ success: true });
@@ -128,7 +161,7 @@ function attachKeyboardListeners() {
   window.addEventListener('keyup', handleKeyUp, true);
 }
 
-// Focus/visibility loses Alt keyup. Commit or dismiss so the overlay cannot stick.
+// Focus/visibility loses the modifier keyup. Commit or dismiss so the overlay cannot stick.
 function attachLifecycleListeners() {
   window.addEventListener('blur', handleWindowBlur, true);
   document.addEventListener('visibilitychange', handleVisibilityChange, true);
@@ -146,15 +179,7 @@ function handleVisibilityChange() {
   closeSwitcher();
 }
 
-function altStillHeld(event) {
-  if (event && typeof event.altKey === 'boolean') return event.altKey;
-  if (typeof event?.getModifierState === 'function') {
-    return event.getModifierState('Alt');
-  }
-  return false;
-}
-
-function finishWithAltRelease() {
+function finishWithHoldRelease() {
   if (!switcherActive) return;
   if (tabs.length === 0) {
     commitWhenReady = true;
@@ -165,17 +190,12 @@ function finishWithAltRelease() {
 
 // Handle keydown events
 function handleKeyDown(event) {
-  // event.code stays "KeyS" when Alt is held. On macOS, event.key becomes "ß".
-  const isS = event.code === 'KeyS' && !event.metaKey && !event.ctrlKey;
-
+  // Matching uses event.code: with Option held on macOS, event.key for S is "ß".
   if (!switcherActive) {
-    if (event.altKey && isS && !event.shiftKey) {
+    if (TabCtrlShared.matchesOpen(hotkey, event)) {
       event.preventDefault();
       event.stopPropagation();
-      console.log('✓ Opening switcher');
-      ignoreNextCommandForward = true;
-      altWasDown = true;
-      openSwitcher();
+      openSwitcher('key');
     }
     return;
   }
@@ -188,24 +208,16 @@ function handleKeyDown(event) {
     return;
   }
 
-  if (event.altKey) altWasDown = true;
+  if (TabCtrlShared.isHoldHeld(hotkey, event)) holdWasDown = true;
 
-  // Alt stays held: S moves forward, Shift+S moves backward.
-  // The browser command for Alt+S is the same keypress, so mark it handled.
-  if (event.altKey && isS) {
+  // Modifier stays held: the key moves forward, Shift+key moves backward.
+  const direction = TabCtrlShared.cycleDirection(hotkey, event);
+  if (direction) {
     event.preventDefault();
     event.stopPropagation();
-    if (ignoreNextKeydownCycle) {
-      ignoreNextKeydownCycle = false;
-      ignoreNextCommandForward = true;
-      return;
-    }
-    ignoreNextCommandForward = true;
-    if (event.shiftKey) {
-      console.log('← Cycling backward (Alt+Shift+S), index:', selectedIndex);
+    if (direction < 0) {
       cycleSelectionUp();
-    } else {
-      console.log('→ Cycling forward (Alt+S), index:', selectedIndex);
+    } else if (claimPress('key')) {
       cycleForward();
     }
     return;
@@ -232,33 +244,37 @@ function handleKeyDown(event) {
     return;
   }
 
-  // Missed Alt keyup failsafe: a later non-navigation key without Alt commits.
-  if (altWasDown && !altStillHeld(event) && !isS) {
-    finishWithAltRelease();
+  // Missed modifier keyup failsafe: a later non-navigation key without it commits.
+  if (holdWasDown && !TabCtrlShared.isHoldHeld(hotkey, event) && event.code !== hotkey?.code) {
+    finishWithHoldRelease();
   }
 }
 
 function handleKeyUp(event) {
-  if (event.key !== 'Alt' && event.code !== 'AltLeft' && event.code !== 'AltRight') {
-    // Modifier state can clear without an Alt keyup on some OS/Chrome paths.
-    if (switcherActive && altWasDown && !altStillHeld(event)) {
-      finishWithAltRelease();
+  if (!switcherActive) return;
+  if (!TabCtrlShared.isHoldKeyEvent(hotkey, event)) {
+    // Modifier state can clear without its own keyup on some OS/Chrome paths.
+    if (holdWasDown && !TabCtrlShared.isHoldHeld(hotkey, event)) {
+      finishWithHoldRelease();
     }
     return;
   }
-  if (!switcherActive) return;
   event.preventDefault();
   event.stopPropagation();
-  altWasDown = false;
-  finishWithAltRelease();
+  holdWasDown = false;
+  finishWithHoldRelease();
 }
 
-function openSwitcher() {
+// source is 'key' or 'command': whichever delivered the opening press.
+function openSwitcher(source) {
   selectedIndex = 1; // Start at the previous tab, not the one already showing.
   pendingMoves = 0;
   commitWhenReady = false;
   pendingVisuals = null;
-  altWasDown = true;
+  holdWasDown = true;
+  keyPresses = [];
+  commandPresses = [];
+  claimPress(source);
 
   if (!mountOverlay()) {
     switcherActive = false;
@@ -282,17 +298,14 @@ function applyVisuals(visuals) {
     const item = shadowRoot.querySelector('.tab-item[data-tab-id="' + visual.id + '"]');
     if (!item) continue;
     const preview = item.querySelector('.tab-preview');
-    if (preview && visual.thumbnail && visual.thumbnail.startsWith('data:') && !preview.querySelector('img')) {
-      preview.replaceChildren();
-      const img = document.createElement('img');
-      img.src = visual.thumbnail;
-      img.alt = '';
-      img.style.cssText = 'width: 100%; height: 100%; object-fit: cover;';
-      preview.appendChild(img);
+    if (visual.thumbnail) {
+      TabCtrlShared.showPreviewShot(preview, visual.thumbnail);
+    } else {
+      TabCtrlShared.showPreviewIcon(preview, visual.favIconUrl);
     }
     const favicon = item.querySelector('.tab-favicon');
     if (favicon && visual.favIconUrl && visual.favIconUrl.startsWith('data:')) {
-      favicon.style.display = '';
+      favicon.style.visibility = '';
       favicon.src = visual.favIconUrl;
     }
   }
@@ -440,10 +453,12 @@ async function renderSwitcherUI() {
     switcherContainer.className = 'tabctrl-switcher';
     switcherContainer.style.position = 'relative';
     switcherContainer.style.zIndex = '1';
+    TabCtrlShared.applyTheme(switcherContainer, panelColor);
     
     // Create tab list
     const tabList = document.createElement('ul');
     tabList.className = 'tab-list';
+    tabList.style.setProperty('--tc-cols', String(TabCtrlShared.columnsFor(tabs.length)));
     
     // Create tab items
     tabs.forEach((tab, index) => {
@@ -454,17 +469,14 @@ async function renderSwitcherUI() {
     // Create keyboard hint
     const hint = document.createElement('div');
     hint.className = 'keyboard-hint';
-    hint.textContent = 'Hold Alt • S forward • Shift+S back • release Alt to select • Esc or click outside to skip';
+    hint.textContent = TabCtrlShared.hint(hotkey, 'Esc or click outside to skip');
     
     // Assemble UI
     switcherContainer.appendChild(tabList);
     switcherContainer.appendChild(hint);
     shadowRoot.appendChild(switcherContainer);
     
-    const selectedItem = shadowRoot.querySelector('.tab-item.selected');
-    if (selectedItem) {
-      selectedItem.scrollIntoView({ block: 'nearest', behavior: 'auto' });
-    }
+    TabCtrlShared.revealItem(switcherContainer, shadowRoot.querySelector('.tab-item.selected'));
     if (pendingVisuals) applyVisuals(pendingVisuals);
   } catch (error) {
     console.error('Error rendering switcher UI:', error);
@@ -492,40 +504,26 @@ function createTabElement(tab, index) {
     domain = 'Page';
   }
   
-  // Show thumbnail if available, otherwise show placeholder
+  // Screenshot if this tab has been on screen, else its site icon, else its initial.
   if (tab.thumbnail && tab.thumbnail.startsWith('data:')) {
-    const img = document.createElement('img');
-    img.src = tab.thumbnail;
-    img.style.cssText = 'width: 100%; height: 100%; object-fit: cover;';
-    img.alt = tab.title;
-    preview.appendChild(img);
+    TabCtrlShared.showPreviewShot(preview, tab.thumbnail);
+  } else if (tab.favIconUrl && tab.favIconUrl.startsWith('data:')) {
+    TabCtrlShared.showPreviewIcon(preview, tab.favIconUrl);
   } else {
-    // Create better placeholder with gradient and icon
-    const placeholder = document.createElement('div');
-    placeholder.className = 'tab-preview-placeholder';
-    
-    // Use first letter or favicon-style icon
-    const displayText = domain.charAt(0).toUpperCase();
-    placeholder.textContent = displayText;
-    
-    // Add gradient based on domain for visual variety
-    const hue = domain.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0) % 360;
-    placeholder.style.background = `linear-gradient(135deg, hsl(${hue}, 60%, 50%), hsl(${hue + 40}, 60%, 60%))`;
-    
-    preview.appendChild(placeholder);
+    preview.appendChild(TabCtrlShared.letterPlaceholder(domain));
   }
   
   // Favicon
   const favicon = document.createElement('img');
   favicon.className = 'tab-favicon';
   favicon.alt = '';
-  favicon.onerror = function() { this.style.display = 'none'; };
+  favicon.onerror = function() { this.style.visibility = 'hidden'; };
   // Only data URLs. A remote favicon is a cross-origin load from this frame,
   // which Chrome reports as an unsafe load on sites such as YouTube.
   if (tab.favIconUrl && tab.favIconUrl.startsWith('data:')) {
     favicon.src = tab.favIconUrl;
   } else {
-    favicon.style.display = 'none';
+    favicon.style.visibility = 'hidden';
   }
   
   // Tab info
@@ -616,13 +614,12 @@ function updateSelection() {
   
   const tabItems = shadowRoot.querySelectorAll('.tab-item');
   tabItems.forEach((item, index) => {
-    if (index === selectedIndex) {
-      item.classList.add('selected');
-      item.scrollIntoView({ block: 'nearest', behavior: 'auto' });
-    } else {
-      item.classList.remove('selected');
-    }
+    item.classList.toggle('selected', index === selectedIndex);
   });
+  TabCtrlShared.revealItem(
+    shadowRoot.querySelector('.tabctrl-switcher'),
+    tabItems[selectedIndex]
+  );
 }
 
 // Commit the current selection and switch tabs
@@ -636,7 +633,7 @@ function commitSelection() {
   const selectedTab = tabs[selectedIndex];
   // Clear the overlay immediately so a slow tabs.update cannot leave it stuck.
   const tabId = selectedTab.id;
-  closeSwitcher();
+  closeSwitcher(true);
 
   chrome.runtime.sendMessage(
     { 
@@ -692,14 +689,22 @@ function closeTab(tabId) {
   );
 }
 
-// Close the switcher and reset state
-function closeSwitcher() {
+// Close the switcher and reset state. A commit reports itself through
+// switchToTab; any other close tells the background the session ended.
+function closeSwitcher(committing = false) {
+  if (switcherActive && !committing) {
+    try {
+      chrome.runtime.sendMessage({ action: 'switcherClosed' }).catch(() => {});
+    } catch (error) {
+      // Extension was reloaded; nothing to notify.
+    }
+  }
   commitWhenReady = false;
-  ignoreNextCommandForward = false;
-  ignoreNextKeydownCycle = false;
   pendingMoves = 0;
   pendingVisuals = null;
-  altWasDown = false;
+  holdWasDown = false;
+  keyPresses = [];
+  commandPresses = [];
   mruRequestId++;
   overlayGeneration++;
   if (overlayElement) {
